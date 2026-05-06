@@ -70,6 +70,10 @@ class OpenAIAuth:
 
 def _check_file_permissions(path: Path) -> None:
     """Warn to stderr if a secrets file has overly permissive permissions."""
+    if os.name == "nt":
+        # Windows reports synthesized POSIX mode bits that do not reflect NTFS ACLs.
+        return
+
     try:
         mode = path.stat().st_mode
         # Check if group or other can read (bits 0o044)

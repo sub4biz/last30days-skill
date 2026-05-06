@@ -41,6 +41,14 @@ class EnvV3Tests(unittest.TestCase):
             with mock.patch.dict(os.environ, {}, clear=False):
                 self.assertIsNone(bird_x.is_bird_authenticated())
 
+    def test_file_permission_check_skips_windows_posix_mode_bits(self):
+        path = mock.Mock(spec=Path)
+        with mock.patch.object(env.os, "name", "nt"), mock.patch.object(env.sys.stderr, "write") as write:
+            env._check_file_permissions(path)
+
+        path.stat.assert_not_called()
+        write.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
