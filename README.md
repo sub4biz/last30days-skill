@@ -302,8 +302,6 @@ Per-client wrapper scripts, custom category-peer subreddits, and the experimenta
 6. **Synthesized into one brief.** Grounded in specific data. Cited by source. Ranked by what people actually engage with. Not "here's what I found." It's "here's what matters."
 7. **Then it becomes your expert.** After one run, your Claude session knows everything the community knows. Ask follow-up questions. Have it write prompts, draft emails, plan trips, architect systems - all grounded in what's real right now.
 
-> 📺 **Going deeper:** 6-min architecture walkthrough - [Real-time Social Listening across 10+ platforms: Under the Hood](https://youtu.be/SFejr5lJFxA).
-
 ## What people are saying
 
 > "I found a Claude Code skill that researches any topic across Reddit, X, YouTube, and HN from the last 30 days. Then writes the prompts for you. I've been manually searching Reddit and X for research before every piece of content I write. Tab by tab. Thread by thread. That's the part that takes 90 minutes. This eliminates it." -@itsjasonai
