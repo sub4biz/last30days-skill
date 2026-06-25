@@ -41,12 +41,13 @@ SYNTHESIS_EOF
 
 # 2. Convert the synthesis to a self-contained HTML file via the engine.
 #    REPLAY THE SAME SCOPE FLAGS as your original run (--plan, --hiring-signals,
-#    resolved --x-handle/--subreddits/etc). The engine re-runs the pipeline to
-#    build the badge metadata line and footer; if you omit the scope flags it
-#    takes the generic multi-source path and the artifact's footer/metadata will
-#    describe a DIFFERENT dataset than your synthesis body (observed: a 74s
-#    mismatched re-run on a --hiring-signals brief). Same flags = footer matches
-#    the brief.
+#    resolved --x-handle/--subreddits/etc). On a same-topic follow-up, the
+#    engine reuses the structured last-report cache at
+#    ~/.config/last30days/last-report.json to build badge metadata and footer
+#    without re-running source fetchers. If the cache is missing or for a
+#    different topic, stderr says "No matching cached report data" and the
+#    engine falls back to a fresh run; the same scope flags keep that fallback
+#    aligned with the synthesis body.
 SLUG=$(echo "$TOPIC" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//')
 HTML_PATH="${LAST30DAYS_MEMORY_DIR}/${SLUG}-brief.html"
 # Collision guard: the `> "$HTML_PATH"` redirect below OVERWRITES - the engine
@@ -92,6 +93,8 @@ Same flow when the topic is `X vs Y` (or `X vs Y vs Z`). The engine routes throu
 ## Follow-up turn
 
 If the user runs `/last30days OpenClaw` normally, sees the synthesis in chat, and THEN says "save that as HTML" or "give me a shareable version" in a follow-up turn, do the same save flow on the synthesis you wrote in the previous turn. Do not re-research; the synthesis is already in the conversation history. Just write it to the temp file and call the engine with `--emit=html --synthesis-file`.
+
+The engine will try to reuse `~/.config/last30days/last-report.json` for that second invocation. If stderr says it is reusing cached report data, continue normally. If stderr says no matching cache exists, let the command finish only if you supplied the same scope flags as the original run; otherwise stop and re-run with the original flags so the HTML footer does not describe a different dataset.
 
 ## What NOT to do
 

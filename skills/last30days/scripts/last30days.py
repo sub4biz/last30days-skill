@@ -602,7 +602,20 @@ def _show_runtime_ui(
         progress.show_promo(promo, diag=diag)
 
 
-def _write_last_run(topic: str, report: "schema.Report") -> None:
+REPORT_CACHE_VERSION = "last30days-report-cache/v1"
+
+
+def _last_report_cache_path() -> Path | None:
+    if env.CONFIG_DIR is None:
+        return None
+    return env.CONFIG_DIR / "last-report.json"
+
+
+def _write_last_run(
+    topic: str,
+    report: "schema.Report",
+    entity_reports: list[tuple[str, schema.Report]] | None = None,
+) -> None:
     try:
         if env.CONFIG_DIR is None:
             return
@@ -614,10 +627,122 @@ def _write_last_run(topic: str, report: "schema.Report") -> None:
             "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "sources": counts,
             "total": sum(counts.values()),
+            "report_cache": str(target / "last-report.json"),
+            "comparison": bool(entity_reports),
         }
         (target / "last-run.json").write_text(json.dumps(payload, indent=2))
+        cached_reports = entity_reports or [(report.topic, report)]
+        cache_payload = {
+            "schema": REPORT_CACHE_VERSION,
+            "topic": topic,
+            "timestamp": payload["timestamp"],
+            "comparison": bool(entity_reports),
+            "reports": [
+                {"entity": label, "report": schema.to_dict(cached_report)}
+                for label, cached_report in cached_reports
+            ],
+        }
+        (target / "last-report.json").write_text(json.dumps(cache_payload, indent=2))
     except Exception:
         pass
+
+
+def _load_last_report_cache(
+    topic: str,
+) -> tuple[schema.Report, list[tuple[str, schema.Report]] | None, Path] | None:
+    cache_path = _last_report_cache_path()
+    if cache_path is None or not cache_path.exists():
+        return None
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        if payload.get("schema") != REPORT_CACHE_VERSION:
+            return None
+        cached_topic = str(payload.get("topic") or "").strip().lower()
+        if cached_topic != topic.strip().lower():
+            return None
+        reports_payload = payload.get("reports") or []
+        if not reports_payload:
+            return None
+        entity_reports = [
+            (str(item.get("entity") or ""), schema.report_from_dict(item["report"]))
+            for item in reports_payload
+            if isinstance(item, dict) and isinstance(item.get("report"), dict)
+        ]
+        if not entity_reports:
+            return None
+        if payload.get("comparison") and len(entity_reports) > 1:
+            return entity_reports[0][1], entity_reports, cache_path
+        return entity_reports[0][1], None, cache_path
+    except Exception:
+        return None
+
+
+def _render_save_and_print(
+    args: argparse.Namespace,
+    report: schema.Report,
+    entity_reports: list[tuple[str, schema.Report]] | None,
+    synthesis_md: str | None,
+    config: dict[str, object],
+) -> int:
+    fun_level = str(config.get("FUN_LEVEL", "medium")).lower()
+    # Comparison HTML is the one case where the saved file's title and content
+    # have to be overridden away from the leading entity's report. Compute the
+    # gate once so the footer-display and save-output paths can't disagree.
+    is_comparison_html = bool(entity_reports) and args.emit == "html"
+    footer_save_path = None
+    if args.output:
+        footer_save_path = compute_output_path_display(args.output)
+    elif args.save_dir:
+        save_topic_for_display = comparison_topic(entity_reports) if is_comparison_html else report.topic
+        footer_save_path = compute_save_path_display(
+            args.save_dir, save_topic_for_display, args.save_suffix or "", args.emit
+        )
+
+    if entity_reports:
+        rendered = emit_comparison_output(
+            entity_reports,
+            args.emit,
+            fun_level=fun_level,
+            save_path=footer_save_path,
+            synthesis_md=synthesis_md,
+        )
+    else:
+        rendered = emit_output(
+            report,
+            args.emit,
+            fun_level=fun_level,
+            save_path=footer_save_path,
+            synthesis_md=synthesis_md,
+        )
+    if args.output:
+        output_path = save_rendered_output(rendered, args.output)
+        sys.stderr.write(f"[last30days] Saved output to {output_path}\n")
+        sys.stderr.flush()
+    if args.save_dir:
+        # Save the main topic's raw file (single-entity or comparison main).
+        save_path = save_output(
+            report,
+            args.emit,
+            args.save_dir,
+            suffix=args.save_suffix or "",
+            synthesis_md=synthesis_md,
+            topic_override=comparison_topic(entity_reports) if is_comparison_html else None,
+            rendered_content=rendered if is_comparison_html else None,
+        )
+        sys.stderr.write(f"[last30days] Saved output to {save_path}\n")
+        # Competitor / vs-mode: also save a per-entity raw file for each peer.
+        # Matches historical vs-mode behavior (N passes -> N save files).
+        if entity_reports and len(entity_reports) > 1:
+            for label, entity_report in entity_reports[1:]:
+                peer_path = save_output(
+                    entity_report, args.emit, args.save_dir,
+                    suffix=args.save_suffix or "",
+                    synthesis_md=synthesis_md,
+                )
+                sys.stderr.write(f"[last30days] Saved output to {peer_path}\n")
+        sys.stderr.flush()
+    print(rendered)
+    return 0
 
 
 def _propagate_config_to_environ(config: dict[str, object]) -> None:
@@ -704,6 +829,7 @@ def main() -> int:
         os.environ["LAST30DAYS_DEBUG"] = "1"
 
     topic = " ".join(args.topic).strip()
+    original_topic = topic
     _validate_extra_argv(parser, topic, extra_argv)
     config = env.get_config(policy=_config_policy_for_args(args, topic, extra_argv))
     _propagate_config_to_environ(config)
@@ -790,6 +916,23 @@ def main() -> int:
         if refuse_msg:
             sys.stderr.write(refuse_msg)
             return 2
+
+    if args.emit == "html" and synthesis_md is not None:
+        cached = _load_last_report_cache(topic)
+        if cached is not None:
+            cached_report, cached_entity_reports, cache_path = cached
+            sys.stderr.write(
+                f"[last30days] Reusing cached report data from {cache_path}\n"
+            )
+            sys.stderr.flush()
+            return _render_save_and_print(
+                args, cached_report, cached_entity_reports, synthesis_md, config
+            )
+        sys.stderr.write(
+            "[last30days] No matching cached report data for "
+            "--emit=html --synthesis-file; running fresh research.\n"
+        )
+        sys.stderr.flush()
 
     progress = ui.ProgressDisplay(topic, show_banner=True)
     progress.start_processing()
@@ -1088,7 +1231,7 @@ def main() -> int:
         report, progress, diag,
         suppress_web_promo=bool(external_plan or comp_plan),
     )
-    _write_last_run(topic, report)
+    _write_last_run(original_topic, report, entity_reports=entity_reports)
     # LAST30DAYS_STORE env var = persistence default-on. Read both os.environ
     # (for shell-exported users) and config (for users who set it in
     # ~/.config/last30days/.env, which env.py loads but does not propagate
@@ -1152,20 +1295,6 @@ def main() -> int:
         except Exception:
             pass
 
-    fun_level = config.get("FUN_LEVEL", "medium").lower()
-    # Comparison HTML is the one case where the saved file's title and content
-    # have to be overridden away from the leading entity's report. Compute the
-    # gate once so the footer-display and save-output paths can't disagree.
-    is_comparison_html = bool(entity_reports) and args.emit == "html"
-    footer_save_path = None
-    if args.output:
-        footer_save_path = compute_output_path_display(args.output)
-    elif args.save_dir:
-        save_topic_for_display = comparison_topic(entity_reports) if is_comparison_html else report.topic
-        footer_save_path = compute_save_path_display(
-            args.save_dir, save_topic_for_display, args.save_suffix or "", args.emit
-        )
-
     # Signal to render_compact whether pre-research flags were supplied.
     # Used to emit a Pre-Research Status warning when the model skipped
     # Step 0.5 / 0.55 and invoked the engine bare on an eligible topic.
@@ -1180,51 +1309,7 @@ def main() -> int:
     )
     report.artifacts["pre_research_flags_present"] = pre_research_flags_present
 
-    if entity_reports:
-        rendered = emit_comparison_output(
-            entity_reports,
-            args.emit,
-            fun_level=fun_level,
-            save_path=footer_save_path,
-            synthesis_md=synthesis_md,
-        )
-    else:
-        rendered = emit_output(
-            report,
-            args.emit,
-            fun_level=fun_level,
-            save_path=footer_save_path,
-            synthesis_md=synthesis_md,
-        )
-    if args.output:
-        output_path = save_rendered_output(rendered, args.output)
-        sys.stderr.write(f"[last30days] Saved output to {output_path}\n")
-        sys.stderr.flush()
-    if args.save_dir:
-        # Save the main topic's raw file (single-entity or comparison main).
-        save_path = save_output(
-            report,
-            args.emit,
-            args.save_dir,
-            suffix=args.save_suffix or "",
-            synthesis_md=synthesis_md,
-            topic_override=comparison_topic(entity_reports) if is_comparison_html else None,
-            rendered_content=rendered if is_comparison_html else None,
-        )
-        sys.stderr.write(f"[last30days] Saved output to {save_path}\n")
-        # Competitor / vs-mode: also save a per-entity raw file for each peer.
-        # Matches historical vs-mode behavior (N passes → N save files).
-        if entity_reports and len(entity_reports) > 1:
-            for label, entity_report in entity_reports[1:]:
-                peer_path = save_output(
-                    entity_report, args.emit, args.save_dir,
-                    suffix=args.save_suffix or "",
-                    synthesis_md=synthesis_md,
-                )
-                sys.stderr.write(f"[last30days] Saved output to {peer_path}\n")
-        sys.stderr.flush()
-    print(rendered)
-    return 0
+    return _render_save_and_print(args, report, entity_reports, synthesis_md, config)
 
 
 if __name__ == "__main__":
